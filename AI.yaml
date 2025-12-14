@@ -66,7 +66,7 @@ const excludeHighPercentage = true;
 const globalRatioLimit = 2;
 const multiplierRegex = /[xX✕✖⨉倍率]((?:[1-9]\d*)|0)(?:\.\d+)?(?=[xX✕✖⨉倍率]|$)/i;
 
-// DNS 配置（国内优先，增强准确性）
+// DNS 配置（fake-ip 模式，最快）
 const dnsConfig = {
   enable: true,
   listen: ':1053',
@@ -75,7 +75,9 @@ const dnsConfig = {
   'use-hosts': true,
   'use-system-hosts': true,
   'respect-rules': true,
-  'enhanced-mode': 'redir-host',
+  'enhanced-mode': 'fake-ip',
+  'fake-ip-range': '198.18.0.1/16',
+  'fake-ip-filter': ['*.lan', '*.local'],  // 精简过滤列表，减少开销
   nameserver: ['https://doh.pub/dns-query', 'https://dns.alidns.com/dns-query'],
   fallback: ['119.29.29.29', '223.5.5.5'],
   'fallback-filter': { geoip: true, ipcidr: ['240.0.0.0/4'] },
@@ -86,9 +88,15 @@ const dnsConfig = {
   },
 };
 
-// 规则提供者通用配置 & 组基础选项
+// 规则提供者通用配置 & 组基础选项（测速间隔放宽到600秒，减少负担）
 const ruleProviderCommon = { type: 'http', format: 'yaml', interval: 86400 };
-const groupBaseOption = { interval: 300, timeout: 3000, url: 'http://cp.cloudflare.com/generate_204', lazy: true, 'max-failed-times': 3 };
+const groupBaseOption = { 
+  interval: 600,              // 原300秒 → 600秒，减少测速频率
+  timeout: 3000, 
+  url: 'http://www.gstatic.com/generate_204',  // 更轻量的204测试点（国内更快）
+  lazy: true, 
+  'max-failed-times': 3 
+};
 
 // 服务配置（完整保留原功能）
 const serviceConfigs = [
@@ -127,44 +135,41 @@ function main(config) {
     throw new Error('配置文件中未找到任何代理节点');
   }
 
-  // 全局配置优化
+  // 全局配置进一步优化（极致提速）
   Object.assign(config, {
     'allow-lan': true,
     'bind-address': '*',
     mode: 'rule',
     dns: dnsConfig,
     profile: { 'store-selected': true, 'store-fake-ip': true },
-    'unified-delay': true,
-    'tcp-concurrent': true,
+    'unified-delay': false,               // 关闭统一延迟，减少额外测速
+    'tcp-concurrent': false,
     'keep-alive-interval': 1800,
-    'find-process-mode': 'strict',
+    'find-process-mode': 'always',
     'geodata-mode': true,
     'geodata-loader': 'memconservative',
     'geo-auto-update': true,
     'geo-update-interval': 24,
+    'strict-route': true,                 // 提升路由效率
     ntp: { enable: true, server: 'cn.ntp.org.cn' },
-    tun: { stack: 'mixed', 'exclude-interface': ['NodeBabyLink'], 'route-exclude-address': skipIps },
+    tun: { 
+      stack: 'system',                    // 最快栈
+      'auto-route': true,                 // 自动路由（部分平台更高效）
+      'auto-redirect': true,              // 自动重定向
+      'exclude-interface': ['NodeBabyLink'], 
+      'route-exclude-address': skipIps 
+    },
     'geox-url': {
       geoip: 'https://github.com/MetaCubeX/meta-rules-dat/releases/download/latest/geoip-lite.dat',
       geosite: 'https://github.com/MetaCubeX/meta-rules-dat/releases/download/latest/geosite.dat',
       mmdb: 'https://github.com/MetaCubeX/meta-rules-dat/releases/download/latest/country-lite.mmdb',
     },
-    sniffer: {
-      enable: true,
-      'force-dns-mapping': true,
-      'parse-pure-ip': false,
-      'override-destination': true,
-      sniff: { TLS: { ports: [443, 8443] }, HTTP: { ports: [80, '8080-8880'] }, QUIC: { ports: [443, 8443] } },
-      'skip-src-address': skipIps,
-      'skip-dst-address': skipIps,
-      'force-domain': ['+.google.com', '+.googleapis.com', '+.youtube.com', '+.facebook.com', '+.fbcdn.net'],
-      'skip-domain': ['Mijia Cloud', '+.oray.com'],
-    },
+    sniffer: { enable: false },
   });
 
   config.proxies.push({ name: '直连', type: 'direct', udp: true });
 
-  // 节点分组处理
+  // 节点分组处理（不变）
   const regionGroups = {};
   regionDefinitions.forEach(r => regionGroups[r.name] = { proxies: [] });
   const otherProxies = [];
@@ -189,24 +194,23 @@ function main(config) {
     generatedGroups.push({ ...groupBaseOption, name: '其他节点', type: 'select', proxies: otherProxies, icon: 'https://raw.githubusercontent.com/Koolson/Qure/master/IconSet/Color/World_Map.png' });
   }
 
-  // 新增：全局延迟优选组（包含所有可用节点）
+  // 延迟优选组：测速周期改为22分钟（1320秒）
   const delaySelectGroup = {
     ...groupBaseOption,
     name: '延迟优选',
     type: 'url-test',
     tolerance: 100,
     lazy: true,
-    interval: 600,
+    interval: 1320,                     // 22分钟 = 22 * 60 = 1320秒
     proxies: [...regionGroupNames.map(name => name), otherProxies.length > 0 ? '其他节点' : null].filter(Boolean),
     icon: 'https://raw.githubusercontent.com/Koolson/Qure/master/IconSet/Color/Auto.png'
   };
 
-  // 功能性分组
+  // 功能性分组（不变）
   const functionalGroups = [{
     ...groupBaseOption,
     name: '默认节点',
     type: 'select',
-    // 在每个组的选项最前面加入“延迟优选”
     proxies: ['延迟优选', ...regionGroupNames, '其他节点', '直连'].filter(Boolean),
     icon: 'https://raw.githubusercontent.com/Koolson/Qure/master/IconSet/Color/Proxy.png',
   }];
@@ -223,10 +227,8 @@ function main(config) {
         ruleProviders[svc.provider.key] = { ...ruleProviderCommon, ...svc.provider };
       }
 
-      // 默认代理列表（先放延迟优选）
       let proxies = ['延迟优选', ...regionGroupNames, '直连'];
 
-      // Hanime 和 H 两个特殊组：移除直连和日本节点
       if (['hanime', 'adult-sites'].includes(svc.key)) {
         proxies = ['延迟优选', 'HK香港', 'TW台湾省', 'SG新加坡']
           .filter(p => p === '延迟优选' || regionGroupNames.includes(p));
@@ -243,7 +245,7 @@ function main(config) {
     }
   });
 
-  // 最终规则
+  // 最终规则（不变）
   rules.push(
     'GEOSITE,private,DIRECT',
     'GEOIP,private,DIRECT,no-resolve',
@@ -252,16 +254,16 @@ function main(config) {
     'MATCH,其他外网'
   );
 
-  // 尾部功能组（同样在最前面加入“延迟优选”）
+  // 尾部功能组（不变）
   functionalGroups.push(
     { ...groupBaseOption, name: '下载软件', type: 'select', proxies: ['延迟优选', '直连', 'REJECT', ...regionGroupNames], icon: 'https://raw.githubusercontent.com/Koolson/Qure/master/IconSet/Color/Download.png' },
     { ...groupBaseOption, name: '其他外网', type: 'select', proxies: ['延迟优选', ...regionGroupNames], icon: 'https://raw.githubusercontent.com/Koolson/Qure/master/IconSet/Color/Streaming!CN.png' },
     { ...groupBaseOption, name: '国内网站', type: 'select', proxies: ['直连', '延迟优选', ...regionGroupNames], url: 'http://wifi.vivo.com.cn/generate_204', icon: 'https://raw.githubusercontent.com/Koolson/Qure/master/IconSet/Color/StreamingCN.png' }
   );
 
-  // 代理组顺序：先放“延迟优选” → 功能组 → 地区组及其他节点组
+  // 代理组顺序（不变）
   config['proxy-groups'] = [
-    delaySelectGroup,           // 新增的全局延迟优选组放在最前面
+    delaySelectGroup,
     ...functionalGroups,
     ...generatedGroups,
   ];
